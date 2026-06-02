@@ -3,23 +3,19 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
-import { Pool } from "pg";
 
 dotenv.config();
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const app = express();
+const PORT = 3000;
 
-async function startServer() {
-  const app = express();
-  const PORT = parseInt(process.env.PORT || '5000', 10);
+// Body parsing middleware
+app.use(express.json());
 
-  // Body parsing middleware
-  app.use(express.json());
+// Initialize Gemini if apiKey is provided
+const hasApiKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "MY_GEMINI_API_KEY";
 
-  // Initialize Gemini if apiKey is provided
-  const hasApiKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "MY_GEMINI_API_KEY";
-  
-  let ai: any = null;
+let ai: any = null;
   if (hasApiKey) {
     try {
       ai = new GoogleGenAI({
@@ -136,7 +132,7 @@ You must output valid JSON following the schema precisely.
 `;
 
       const response = await ai.models.generateContent({
-        model: "gemini-2.0-flash",
+        model: "gemini-3.5-flash",
         contents: prompt,
         config: {
           systemInstruction: "You are a professional recruiting assistant for Georgia who NEVER invents or fabricates fake university credentials, mock projects, or accomplishments that the user didn't write. You write exclusively in the first-person singular perspective (პირველი პირის მხოლობითი რიცხვი, მე) to maintain perfect grammatical consistency throughout the whole resume.",
@@ -161,29 +157,13 @@ You must output valid JSON following the schema precisely.
       const responseText = response.text || "{}";
       const result = JSON.parse(responseText);
 
-      return res.json({ success: true, ...result });
-    } catch (error: any) {
-      console.warn("Gemini CV Builder unavailable, using fallback:", error?.message?.slice(0, 80));
-      // Fall back to rich template mode on any Gemini error (quota, 503, etc.)
-      const hasDetails = (req.body.education?.trim()) || (req.body.projects?.trim()) || (req.body.activities?.trim()) || (req.body.skills?.trim());
-      const polishedProjects = req.body.projects?.trim()
-        ? req.body.projects.split('\n').filter((l: string) => l.trim()).map((l: string) => `• ${l.trim().replace(/^[•\-]\s*/, '')}`).join('\n')
-        : "";
-      const polishedActivities = req.body.activities?.trim()
-        ? req.body.activities.split('\n').filter((l: string) => l.trim()).map((l: string) => `• ${l.trim().replace(/^[•\-]\s*/, '')}`).join('\n')
-        : "";
-      const skillList = req.body.skills?.trim()
-        ? req.body.skills.split(',').map((s: string) => s.trim()).filter(Boolean)
-        : [];
       return res.json({
         success: true,
-        isMock: true,
-        summary: hasDetails ? "ვარ მოტივირებული სტუდენტი, ორიენტირებული ვარ პრაქტიკული უნარების განვითარებაზე და მზად ვარ პირველი პროფესიული გამოწვევებისთვის." : "",
-        education: req.body.education?.trim() || "",
-        projects: polishedProjects,
-        activities: polishedActivities,
-        skills: skillList
+        ...result
       });
+    } catch (error: any) {
+      console.error("Gemini CV Builder Error:", error);
+      res.status(500).json({ error: error.message || "Failed to generate CV using AI" });
     }
   });
 
@@ -285,7 +265,7 @@ Output a JSON array with exactly 10 matching vacancies in this order.
 `;
 
       const response = await ai.models.generateContent({
-        model: "gemini-2.0-flash",
+        model: "gemini-3.5-flash",
         contents: prompt,
         config: {
           responseMimeType: "application/json",
@@ -316,29 +296,8 @@ Output a JSON array with exactly 10 matching vacancies in this order.
       const result = JSON.parse(responseText);
       return res.json({ success: true, matches: result });
     } catch (error: any) {
-      console.warn("Gemini Job Matcher unavailable, using fallback:", error?.message?.slice(0, 80));
-      // Fall back to skill-based static matching
-      const skillsString = (req.body.cvData?.skills || []).join(", ").toLowerCase();
-      const fallbackVacancies = [
-        { id: "tbc", targetSkills: ["Python", "Excel", "SQL"] },
-        { id: "galt", targetSkills: ["Excel", "Research"] },
-        { id: "wissol", targetSkills: ["Social Media", "Canva"] },
-        { id: "epam", targetSkills: ["React", "JavaScript"] },
-        { id: "sweeft", targetSkills: ["Python", "Django"] },
-        { id: "redberry", targetSkills: ["Figma", "Wireframing"] },
-        { id: "tegeta", targetSkills: ["Communication", "MS Office"] },
-        { id: "space", targetSkills: ["SEO", "Analytics"] },
-        { id: "psp", targetSkills: ["Excel", "SQL"] },
-        { id: "co_fund", targetSkills: ["Excel", "Financial Modeling"] }
-      ];
-      const matches = fallbackVacancies.map((vac) => {
-        const matchedSkills = vac.targetSkills.filter(s => skillsString.includes(s.toLowerCase()));
-        const missingSkills = vac.targetSkills.filter(s => !skillsString.includes(s.toLowerCase()));
-        const ratio = matchedSkills.length / vac.targetSkills.length;
-        const matchPercent = matchedSkills.length > 0 ? Math.min(99, Math.max(65, Math.round(55 + ratio * 44))) : Math.round(50 + Math.random() * 15);
-        return { id: vac.id, matchPercent, matchedSkills, missingSkills, tip: missingSkills.length > 0 ? `გირჩევთ დაეუფლოთ ${missingSkills[0]}-ს.` : "თქვენი პროფილი მზადაა! გააგზავნეთ განაცხადი." };
-      });
-      return res.json({ success: true, isMock: true, matches });
+      console.error("Gemini Job Matcher Error:", error);
+      res.status(500).json({ error: error.message || "Failed to calculate job matches" });
     }
   });
 
@@ -879,156 +838,9 @@ Output a JSON array with exactly 10 matching vacancies in this order.
     `);
   });
 
-  // ─── PostgreSQL Database API ───────────────────────────────────────────────
-
-  // GET /api/db/users/:userId/cvs
-  app.get("/api/db/users/:userId/cvs", async (req, res) => {
-    try {
-      const { userId } = req.params;
-      const result = await pool.query(
-        `SELECT id, title, template, summary, education, projects, activities,
-                skills, name, email, phone, photo_url, last_updated
-         FROM cvs WHERE user_id = $1 ORDER BY created_at ASC`,
-        [userId]
-      );
-      const cvs = result.rows.map((r: any) => ({
-        id: r.id,
-        title: r.title,
-        template: r.template,
-        summary: r.summary,
-        education: r.education,
-        projects: r.projects,
-        activities: r.activities,
-        skills: r.skills,
-        name: r.name,
-        email: r.email,
-        phone: r.phone,
-        photoUrl: r.photo_url,
-        lastUpdated: r.last_updated,
-      }));
-      res.json(cvs);
-    } catch (err: any) {
-      console.error("GET cvs error:", err.message);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // PUT /api/db/users/:userId/cvs/:cvId
-  app.put("/api/db/users/:userId/cvs/:cvId", async (req, res) => {
-    try {
-      const { userId, cvId } = req.params;
-      const cv = req.body;
-      // Ensure user row exists first
-      await pool.query(
-        `INSERT INTO users (id, email, full_name, created_at)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (id) DO NOTHING`,
-        [userId, cv.email || "", cv.name || "", new Date().toISOString()]
-      );
-      await pool.query(
-        `INSERT INTO cvs (id, user_id, title, template, summary, education, projects,
-                          activities, skills, name, email, phone, photo_url, last_updated)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-         ON CONFLICT (id) DO UPDATE SET
-           title=$3, template=$4, summary=$5, education=$6, projects=$7,
-           activities=$8, skills=$9, name=$10, email=$11, phone=$12,
-           photo_url=$13, last_updated=$14`,
-        [
-          cvId, userId, cv.title || "", cv.template || "classic",
-          cv.summary || "", cv.education || "", cv.projects || "",
-          cv.activities || "", JSON.stringify(cv.skills || []),
-          cv.name || "", cv.email || "", cv.phone || "",
-          cv.photoUrl || "", cv.lastUpdated || new Date().toISOString(),
-        ]
-      );
-      res.json({ ok: true });
-    } catch (err: any) {
-      console.error("PUT cv error:", err.message);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // DELETE /api/db/users/:userId/cvs/:cvId
-  app.delete("/api/db/users/:userId/cvs/:cvId", async (req, res) => {
-    try {
-      const { userId, cvId } = req.params;
-      await pool.query("DELETE FROM cvs WHERE id=$1 AND user_id=$2", [cvId, userId]);
-      res.json({ ok: true });
-    } catch (err: any) {
-      console.error("DELETE cv error:", err.message);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // PUT /api/db/users/:userId  (upsert user profile)
-  app.put("/api/db/users/:userId", async (req, res) => {
-    try {
-      const { userId } = req.params;
-      const u = req.body;
-      await pool.query(
-        `INSERT INTO users (id, email, full_name, created_at, picture, preferences)
-         VALUES ($1,$2,$3,$4,$5,$6)
-         ON CONFLICT (id) DO UPDATE SET
-           email=$2, full_name=$3, picture=$5, preferences=$6`,
-        [
-          userId, u.email || "", u.fullName || u.full_name || "",
-          u.createdAt || new Date().toISOString(),
-          u.picture || "",
-          JSON.stringify(u.preferences || {}),
-        ]
-      );
-      res.json({ ok: true });
-    } catch (err: any) {
-      console.error("PUT user error:", err.message);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // GET /api/db/users/:userId/applications
-  app.get("/api/db/users/:userId/applications", async (req, res) => {
-    try {
-      const { userId } = req.params;
-      const result = await pool.query(
-        "SELECT id, user_id, job_id, cv_id, applied_at, status FROM applications WHERE user_id=$1",
-        [userId]
-      );
-      const apps = result.rows.map((r: any) => ({
-        id: r.id,
-        userId: r.user_id,
-        jobId: r.job_id,
-        cvId: r.cv_id,
-        appliedAt: r.applied_at,
-        status: r.status,
-      }));
-      res.json(apps);
-    } catch (err: any) {
-      console.error("GET applications error:", err.message);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // POST /api/db/users/:userId/applications
-  app.post("/api/db/users/:userId/applications", async (req, res) => {
-    try {
-      const { userId } = req.params;
-      const a = req.body;
-      await pool.query(
-        `INSERT INTO applications (id, user_id, job_id, cv_id, applied_at, status)
-         VALUES ($1,$2,$3,$4,$5,$6)
-         ON CONFLICT (id) DO NOTHING`,
-        [a.id, userId, a.jobId, a.cvId, a.appliedAt, a.status || "submitted"]
-      );
-      res.json({ ok: true });
-    } catch (err: any) {
-      console.error("POST application error:", err.message);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // ──────────────────────────────────────────────────────────────────────────
-
-  // --- Serve Vite in Dev, fallback to static dist folder in Prod ---
-  if (process.env.NODE_ENV !== "production") {
+// --- Serve Vite in Dev, fallback to static dist folder in Prod ---
+async function bootstrap() {
+  if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -1043,9 +855,17 @@ Output a JSON array with exactly 10 matching vacancies in this order.
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server is running at http://0.0.0.0:${PORT}`);
-  });
+  // Only start listening when not deployed on Vercel as a Serverless function
+  if (!process.env.VERCEL) {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server is running at http://0.0.0.0:${PORT}`);
+    });
+  }
 }
 
-startServer();
+bootstrap().catch((err) => {
+  console.error("Bootstrap error:", err);
+});
+
+export { app };
+export default app;
